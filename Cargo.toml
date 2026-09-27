@@ -1,0 +1,53 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "sen-sysone"
+version = "0.1.0"
+edition = "2021"
+description = "SenClaw decision runtime: typed choice/score/noul answers from a local Laya checkpoint (ONNX Runtime) or a hosted Jev-compatible backend"
+license = "MIT"
+repository = "https://github.com/SenClaw/sen-sysone"
+
+[[bin]]
+name = "sen-sysone"
+path = "src/main.rs"
+
+[dependencies]
+sen-runtime-sdk = { path = "../senclaw/crates/sen-runtime-sdk" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["json"] }
+once_cell = "1"
+futures = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+hex = "0.4"
+
+# The Laya ONNX engine. `ort` downloads a prebuilt onnxruntime at build time —
+# no system ONNX Runtime install needed. Pinned to the exact version the old
+# daemon validated Laya against (its Cargo.lock resolved rc.12): a newer rc
+# renamed the CPU execution-provider API this engine was written against, and
+# parity is only proven against this build. Kept feature-gated (default on) so
+# a build can drop it for the online-only path.
+ort = { version = "=2.0.0-rc.12", optional = true, features = ["download-binaries"] }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[features]
+default = ["decision-laya"]
+decision-laya = ["dep:ort", "dep:tokenizers"]
