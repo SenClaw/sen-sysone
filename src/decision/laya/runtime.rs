@@ -13,7 +13,9 @@
 //! **One load per model.** A load runs in a detached task that publishes its
 //! result to everyone waiting on it and cleans up after itself: a client that
 //! disconnects mid-load (which cancels its handler) must neither strand the id
-//! in "loading" nor throw away weights that finished loading.
+//! in "loading" nor throw away weights that finished loading. Loads of
+//! different models take turns ([`ONE_LOAD_AT_A_TIME`]): ONNX Runtime cannot
+//! safely create two sessions at once on macOS.
 //!
 //! **When weights leave**: a sweeper wakes every [`SWEEP_EVERY`] and unloads
 //! any model no request has *started* on for the configured idle time. A
@@ -148,6 +150,18 @@ static LOADING: Lazy<Mutex<HashMap<String, PendingLoad>>> = Lazy::new(|| Mutex::
 /// always `LOADING` then `DELETING`.
 static DELETING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
+/// Held by a load while it builds its engine, so two models never load at
+/// once (the parity test holds it too). ONNX Runtime finds a graph's external weights from a directory it
+/// gets from libc `dirname()`, and on macOS that hands every caller the same
+/// static buffer: two sessions created together can each read the other's
+/// directory, and one fails to find its weights. (It surfaces as
+/// "Encountered unknown exception in Initialize()" — the `filesystem_error`
+/// comes from the system libc++, which the statically linked ONNX Runtime
+/// cannot catch as a `std::exception`.) Inference never goes there, so only
+/// loads take turns — and a load is rare and takes seconds anyway.
+#[cfg(feature = "decision-laya")]
+pub(super) static ONE_LOAD_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The idle limit the sweeper applies, in minutes (0 = never). Kept current
 /// by [`apply_settings`], which every settings read and save goes through.
 static IDLE_UNLOAD_MINUTES: AtomicU64 = AtomicU64::new(DEFAULT_IDLE_UNLOAD_MINUTES);
@@ -270,7 +284,10 @@ pub async fn load(
 #[cfg(feature = "decision-laya")]
 fn spawn_load(key: String, layout: ModelLayout, threads: usize, on_demand: bool) -> PendingLoad {
     let task = tokio::spawn(async move {
-        let result = tokio::task::spawn_blocking(move || super::engine::LayaEngine::load(&layout, threads)).await;
+        let result = {
+            let _turn = ONE_LOAD_AT_A_TIME.lock().await;
+            tokio::task::spawn_blocking(move || super::engine::LayaEngine::load(&layout, threads)).await
+        };
         let outcome: LoadOutcome = match result {
             Err(e) => Err(format!("load task failed: {e}")),
             Ok(Err(e)) => Err(format!("{e:#}")),
@@ -807,6 +824,54 @@ mod tests {
         let req: AskRequest = serde_json::from_str(r#"{"state": "x", "questions": {}}"#).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         assert!(matches!(ask(req, &s, tmp.path()).await, Err(RuntimeError::BadRequest(_))));
+    }
+
+    /// Requests naming different checkpoints at the same moment must each get
+    /// theirs: the single-flight is per id, so nothing but
+    /// `ONE_LOAD_AT_A_TIME` keeps their ONNX Runtime sessions from being
+    /// created together (which on macOS failed one load in a few dozen).
+    /// Ignored by default because it needs exported checkpoints on disk:
+    ///
+    /// ```text
+    /// SENCLAW_LAYA_LOAD_ROOT=<dir of two or more model folders> \
+    ///   cargo test --features decision-laya same_moment -- --ignored --nocapture
+    /// ```
+    ///
+    /// `SENCLAW_LAYA_LOAD_ROUNDS` sets how many times (default 20); linking a
+    /// checkpoint into the folder under a second name adds a load per round.
+    #[cfg(feature = "decision-laya")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs two or more exported Laya checkpoints: set SENCLAW_LAYA_LOAD_ROOT"]
+    async fn checkpoints_asked_for_at_the_same_moment_all_load() {
+        let root = std::env::var("SENCLAW_LAYA_LOAD_ROOT").expect("set SENCLAW_LAYA_LOAD_ROOT");
+        let rounds: usize = std::env::var("SENCLAW_LAYA_LOAD_ROUNDS")
+            .ok()
+            .and_then(|r| r.parse().ok())
+            .unwrap_or(20);
+        let mut models: Vec<(String, ModelLayout)> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| {
+                let e = e.ok()?;
+                let layout = ModelLayout::detect(&e.path()).ok()?;
+                Some((e.file_name().to_string_lossy().into_owned(), layout))
+            })
+            .collect();
+        models.sort_by(|a, b| a.0.cmp(&b.0));
+        assert!(models.len() >= 2, "need two or more checkpoints under {root}");
+
+        for round in 1..=rounds {
+            let loads = models.iter().map(|(id, layout)| load(id, layout.clone(), None, true));
+            let outcomes = futures::future::join_all(loads).await;
+            let mut failed = Vec::new();
+            for ((id, _), outcome) in models.iter().zip(outcomes) {
+                match outcome {
+                    Ok(info) => eprintln!("round {round}: `{id}` loaded in {} ms", info.load_ms),
+                    Err(e) => failed.push(format!("`{id}`: {e}")),
+                }
+                unload(id);
+            }
+            assert!(failed.is_empty(), "round {round} of {rounds}: {}", failed.join("; "));
+        }
     }
 
     #[cfg(not(feature = "decision-laya"))]

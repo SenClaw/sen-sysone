@@ -92,7 +92,10 @@ struct Row {
 }
 
 impl LayaEngine {
-    /// `threads` is ONNX Runtime's intra-op thread count.
+    /// `threads` is ONNX Runtime's intra-op thread count. Two loads must never
+    /// run at once: ONNX Runtime cannot safely create sessions concurrently on
+    /// macOS (`runtime::ONE_LOAD_AT_A_TIME` says why; every caller takes turns
+    /// on it).
     pub fn load(layout: &ModelLayout, threads: usize) -> Result<LayaEngine> {
         let started = Instant::now();
         let cfg = LayaConfig::from_file(&layout.config)?;

@@ -57,7 +57,13 @@ clients render unchanged, and forwards only `backend`/`local`/`online` on
 - **A load runs in a detached task, once per model.** `LOADING` holds a
   `Shared` future every waiter awaits; the task fills `LOADED` *then* leaves
   `LOADING`. Delete holds a `DeleteGuard` across unload and removal so no
-  hot-load slips in between.
+  hot-load slips in between. **Loads of different models take turns** on
+  `ONE_LOAD_AT_A_TIME`, held inside that task: ONNX Runtime finds external
+  weights through libc `dirname()`, which on macOS returns one static buffer
+  for every thread, so two sessions created at once can swap directories and
+  one load fails as "Encountered unknown exception in Initialize()". Do not
+  drop it to parallelise loads; the ignored `same_moment` test
+  (`SENCLAW_LAYA_LOAD_ROOT=<dir of model folders>`) is its proof.
 - **Weights load on request, never at boot** — the `/load` route, or a
   request when *load on demand* is on. Unload returns the memory. The idle
   sweeper counts from the last request's *start* and re-checks under the

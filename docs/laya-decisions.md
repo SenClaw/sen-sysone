@@ -83,7 +83,17 @@ history): `research-260924-1225-jev-typesafe-system-one.md`,
 
 The response's `routing.reason` says which rule picked the model and whether it
 was loaded on demand. A load runs once per model however many requests wait on
-it, and a client that disconnects mid-load does not strand it.
+it, and a client that disconnects mid-load does not strand it. Loads of
+different models take turns: ONNX Runtime cannot safely create two sessions at
+once on macOS (it finds a graph's external weights through libc `dirname()`,
+which hands every thread the same buffer), so a request can wait for another
+model's load to finish first. An ignored test loads every checkpoint in a
+folder at the same moment, round after round:
+
+```bash
+SENCLAW_LAYA_LOAD_ROOT=<dir of two or more model folders> \
+  cargo test --features decision-laya same_moment -- --ignored --nocapture
+```
 
 Language matters because the **English** checkpoint reads Vietnamese badly
 *and* confidently (a Vietnamese billing email scored 0.93 "spam", 0.72

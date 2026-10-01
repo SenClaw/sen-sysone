@@ -44,7 +44,11 @@ fn rust_matches_python_on_every_fixture_case() {
             eprintln!("skipping {model}: {} not found", dir.display());
             continue;
         }
-        let engine = LayaEngine::load(&ModelLayout::detect(&dir).unwrap(), super::runtime::resolve_threads(None)).unwrap();
+        let engine = {
+            // Never alongside another test's load (`runtime::ONE_LOAD_AT_A_TIME`).
+            let _turn = super::runtime::ONE_LOAD_AT_A_TIME.blocking_lock();
+            LayaEngine::load(&ModelLayout::detect(&dir).unwrap(), super::runtime::resolve_threads(None)).unwrap()
+        };
         eprintln!("{model}: loaded in {} ms ({} batch)", engine.load_ms, if engine.fixed_batch { "fixed" } else { "dynamic" });
         let Json::Array(cases) = spec.get("cases").unwrap() else { panic!("cases") };
         for case in cases {
