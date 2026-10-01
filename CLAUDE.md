@@ -47,6 +47,16 @@ clients render unchanged, and forwards only `backend`/`local`/`online` on
   from the Hub's tree listing, the rest from a `manifest.json` when present.
   A directory is installed only once `senclaw-laya.json` is written —
   always last.
+- **`laya-browser` is SenClaw's own export, hosted as a GitHub release of
+  this repo** (`Host::GithubRelease`), so nobody needs an account to publish
+  or download it. Tag `model-laya-browser-<version>` →
+  `.github/workflows/model-laya-browser.yml` runs
+  `tools/laya-browser-export/export.py` (pinned checkpoint commit, parity
+  against PyTorch incl. format-v5 browser requests) and attaches the files,
+  `/` flattened to `__`. A tag can move, so the pin is the release
+  manifest's **sha256** in the catalog entry (the test requires 64 hex); copy
+  it from the release notes after the workflow finishes. A new checkpoint
+  means a new tag, never re-running an old one.
 - **The English checkpoint must not see Vietnamese.** It reads it
   confidently wrong. Routing (`plan_local` in
   `src/decision/laya/runtime.rs`) sends text with non-ASCII *letters* to a

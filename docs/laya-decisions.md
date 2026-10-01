@@ -179,6 +179,20 @@ makers document parity with PyTorch, each **pinned to a commit**:
 | `multilingual` | `ti3x-m/laya-multilingual-onnx` | batch fixed at 1, `act_probs`, sha256 for every file in `manifest.json` |
 | `english` | `receptron/laya-onnx` | dynamic batch, `act_probs` |
 | `typed-decisions` | `ti3x-m/laya-typed-decisions-onnx` | batch fixed at 1, `act_probs` |
+| `laya-browser` | GitHub release `SenClaw/sen-sysone@model-laya-browser-v19s` | SenClaw's own export of `cklxx/laya-browser` v19s: dynamic batch, `act_logits`, sha256 for every file in `manifest.json`, parity with PyTorch |
+
+`laya-browser` is the browser engine's checkpoint, not a general one: it
+answers the step requests of the daemon's browser loop (request format v5,
+`laya_fmt` in its `rl_agent_config.json`) and nothing else well. No ONNX
+export of it existed on the Hub, so SenClaw publishes one as a GitHub
+release of this repo: CI (`.github/workflows/model-laya-browser.yml`, on a
+`model-laya-browser-*` tag) runs `tools/laya-browser-export/export.py`, which
+exports the pinned checkpoint with laya's graph exporter, refuses to publish
+unless ONNX Runtime matches PyTorch (Laya's parity cases plus three browser
+requests in format v5), and attaches the files with `/` flattened to `__`.
+A release has no commit to pin, so the catalog pins the sha256 of its
+`manifest.json`, which pins every file. Neither publishing nor downloading
+needs an account.
 
 Every LFS file is checked against the sha256 in the Hub's tree listing (and
 the manifest when there is one). Files land as `<name>.part` and are renamed

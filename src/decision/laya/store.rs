@@ -29,13 +29,43 @@ pub struct CatalogEntry {
     /// What this particular export is — shown only when the model came from it.
     pub export_note: &'static str,
     pub kind: ModelKind,
+    pub host: Host,
     pub repo: &'static str,
+    /// A full commit sha on the Hub; the release tag for a GitHub release.
     pub revision: &'static str,
     pub files: &'static [&'static str],
     /// A manifest listing sha256 for every file (ti3x-m publishes one). LFS
     /// files carry their sha256 in the Hub's tree listing either way.
     pub manifest: Option<&'static str>,
     pub approx_size_mb: u32,
+}
+
+/// Where a catalog export is published. Both need no account to download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Host {
+    /// A Hugging Face repo, pinned to a commit.
+    HuggingFace,
+    /// A GitHub release of `repo` (tag = `revision`). A tag can be moved and
+    /// an asset replaced, so the pin is the sha256 of the release's
+    /// `manifest.json`, which in turn pins every file. Asset names cannot hold
+    /// a directory: `tokenizer/tokenizer.json` is the asset
+    /// `tokenizer__tokenizer.json` ([`github_asset_name`]).
+    GithubRelease { manifest_sha256: &'static str },
+}
+
+impl Host {
+    /// The page a person opens to see where the files come from.
+    pub fn page_url(self, repo: &str, revision: &str) -> String {
+        match self {
+            Host::HuggingFace => format!("https://huggingface.co/{repo}/tree/{revision}"),
+            Host::GithubRelease { .. } => format!("https://github.com/{repo}/releases/tag/{revision}"),
+        }
+    }
+}
+
+/// Release asset name for a file of an export (the exporter flattens the same way).
+pub fn github_asset_name(path: &str) -> String {
+    path.replace('/', "__")
 }
 
 const TI3X_FILES: &[&str] = &[
@@ -54,6 +84,7 @@ pub static CATALOG: &[CatalogEntry] = &[
         export_note: "Bản ONNX của ti3x-m: mỗi câu hỏi một lần chạy, sha256 cho từng file, \
                       parity với PyTorch trên 34 ca.",
         kind: ModelKind::Multilingual,
+        host: Host::HuggingFace,
         repo: "ti3x-m/laya-multilingual-onnx",
         revision: "ab6836981ce0ea5937e605fb76ddac8960bd1e21",
         files: TI3X_FILES,
@@ -67,6 +98,7 @@ pub static CATALOG: &[CatalogEntry] = &[
                       (một email hoá đơn tiếng Việt bị chấm 0,93 là spam).",
         export_note: "Bản ONNX của receptron: batch động, lệch ~1e-5 so với PyTorch.",
         kind: ModelKind::English,
+        host: Host::HuggingFace,
         repo: "receptron/laya-onnx",
         revision: "68f27dfe5a27a54fb2b1fefc432f43f972e90868",
         files: &[
@@ -86,11 +118,39 @@ pub static CATALOG: &[CatalogEntry] = &[
                       bảo mật, observability. Chỉ tiếng Anh.",
         export_note: "Bản ONNX của ti3x-m.",
         kind: ModelKind::English,
+        host: Host::HuggingFace,
         repo: "ti3x-m/laya-typed-decisions-onnx",
         revision: "d562cfa57474bf409fee22218611c577ee0cdc0c",
         files: TI3X_FILES,
         manifest: Some("manifest.json"),
         approx_size_mb: 1690,
+    },
+    // The browser engine's own checkpoint: cklxx/laya-browser v19s, exported
+    // in CI (`tools/laya-browser-export`, `.github/workflows/model-laya-browser.yml`)
+    // and checked against PyTorch before it was published as a release.
+    CatalogEntry {
+        id: "laya-browser",
+        label: "Laya Browser v19s (mmBERT-base, 322M)",
+        description: "Fine-tune của bản Multilingual cho trình duyệt: chọn thao tác và phần tử \
+                      cho từng bước của engine browser (đọc request format v5). Không dùng cho việc khác.",
+        export_note: "Bản ONNX do SenClaw xuất trong CI từ cklxx/laya-browser v19s (645cf36), tải từ \
+                      GitHub Release: batch động, sha256 cho từng file, parity với PyTorch.",
+        kind: ModelKind::Multilingual,
+        host: Host::GithubRelease {
+            manifest_sha256: "ed432aeea1b1b2753253d8373f30e658e55b8ec3c066857d999a826735a891b4",
+        },
+        repo: "SenClaw/sen-sysone",
+        revision: "model-laya-browser-v19s",
+        files: &[
+            "laya.onnx",
+            "laya.onnx.data",
+            "rl_agent_config.json",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+            "source.json",
+        ],
+        manifest: Some("manifest.json"),
+        approx_size_mb: 1325,
     },
 ];
 
@@ -130,6 +190,10 @@ pub struct Source {
     pub revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Where the files came from, for a person to open. Absent on models
+    /// installed before it existed — those all came from the Hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,7 +310,12 @@ pub fn list(root: &Path) -> Vec<ModelView> {
         let loaded = runtime::loaded_info(id);
         let source = match (&meta, entry) {
             (Some(m), _) => serde_json::to_value(&m.source).unwrap_or(Value::Null),
-            (None, Some(e)) => json!({"type": "catalog", "repo": e.repo, "revision": e.revision}),
+            (None, Some(e)) => json!({
+                "type": "catalog",
+                "repo": e.repo,
+                "revision": e.revision,
+                "url": e.host.page_url(e.repo, e.revision),
+            }),
             (None, None) => Value::Null,
         };
         ModelView {
@@ -339,7 +408,14 @@ mod tests {
     #[test]
     fn catalog_entries_are_pinned_and_downloadable() {
         for e in CATALOG {
-            assert_eq!(e.revision.len(), 40, "{} must pin a full commit sha", e.id);
+            match e.host {
+                Host::HuggingFace => assert_eq!(e.revision.len(), 40, "{} must pin a full commit sha", e.id),
+                Host::GithubRelease { manifest_sha256 } => {
+                    assert!(e.manifest.is_some(), "{}: a release is pinned through its manifest", e.id);
+                    assert_eq!(manifest_sha256.len(), 64, "{} must pin its manifest's sha256", e.id);
+                    assert!(manifest_sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+                }
+            }
             assert!(valid_id(e.id));
             let graph = e.files.iter().any(|f| super::super::layout::GRAPH_CANDIDATES.contains(f));
             let config = e.files.iter().any(|f| super::super::layout::CONFIG_CANDIDATES.contains(f));
@@ -367,7 +443,7 @@ mod tests {
                 id: "english".into(),
                 label: None,
                 kind: ModelKind::English,
-                source: Source { kind: "folder".into(), repo: None, revision: None, path: Some("/x".into()) },
+                source: Source { kind: "folder".into(), repo: None, revision: None, path: Some("/x".into()), url: None },
                 installed_at: 0,
                 files: vec![],
             },
@@ -395,7 +471,7 @@ mod tests {
                 id: "m".into(),
                 label: None,
                 kind: ModelKind::English,
-                source: Source { kind: "folder".into(), repo: None, revision: None, path: Some("/x".into()) },
+                source: Source { kind: "folder".into(), repo: None, revision: None, path: Some("/x".into()), url: None },
                 installed_at: 0,
                 files: vec![],
             },

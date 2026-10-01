@@ -1,9 +1,11 @@
-//! Background jobs that put a model on disk: a Hugging Face download or a
-//! copy of an export that already exists locally.
+//! Background jobs that put a model on disk: a download (Hugging Face, or a
+//! GitHub release for SenClaw's own exports) or a copy of an export that
+//! already exists locally.
 //!
-//! A download is pinned to one commit for its whole run, verifies every file
-//! whose sha256 is known — LFS files carry it in the Hub's tree listing, and a
-//! `manifest.json` can supply the rest — and writes `<file>.part` until the
+//! A download is pinned for its whole run — to one Hub commit, or to a GitHub
+//! release whose `manifest.json` must match a pinned sha256 — verifies every
+//! file whose sha256 is known — LFS files carry it in the Hub's tree listing,
+//! and a `manifest.json` supplies the rest — and writes `<file>.part` until the
 //! bytes check out, so a crash never leaves a truncated weight file under its
 //! real name. Cancelling keeps the `.part`; the next download resumes it with
 //! an HTTP range request instead of starting a 1.7 GB file over.
@@ -20,9 +22,10 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 use super::layout::ModelLayout;
-use super::store::{self, FileRecord, Metadata, Source};
+use super::store::{self, FileRecord, Host, Metadata, Source};
 
 const HF_BASE: &str = "https://huggingface.co";
+const GITHUB_BASE: &str = "https://github.com";
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -236,8 +239,9 @@ pub struct DownloadSpec {
     pub label: Option<String>,
     /// `catalog` or `huggingface` — recorded in the metadata.
     pub source_kind: &'static str,
+    pub host: Host,
     pub repo: String,
-    /// A full commit sha.
+    /// A full commit sha on the Hub; the release tag on GitHub.
     pub revision: String,
     pub files: Vec<String>,
     pub manifest: Option<String>,
@@ -267,22 +271,7 @@ async fn run_download(
     state.lock().unwrap().status = JobStatus::Listing;
     let client = http()?;
 
-    let entries = tree(&client, &spec.repo, &spec.revision).await?;
-    let mut expected: HashMap<String, (u64, Option<String>)> = HashMap::new();
-    for e in &entries {
-        expected.insert(e.path.clone(), (e.size, e.lfs.as_ref().map(|l| l.oid.clone())));
-    }
-    if let Some(m) = &spec.manifest {
-        let url = format!("{HF_BASE}/{}/resolve/{}/{m}", spec.repo, spec.revision);
-        let manifest: serde_json::Value = client.get(&url).send().await?.error_for_status()?.json().await?;
-        for f in manifest["files"].as_array().into_iter().flatten() {
-            if let (Some(p), Some(sha)) = (f["path"].as_str(), f["sha256"].as_str()) {
-                if let Some(slot) = expected.get_mut(p) {
-                    slot.1 = Some(sha.to_ascii_lowercase());
-                }
-            }
-        }
-    }
+    let expected = expected_files(&client, spec).await?;
     let mut plan = Vec::new();
     for f in &spec.files {
         let (size, sha) = expected
@@ -304,7 +293,7 @@ async fn run_download(
             return Ok(false);
         }
         state.lock().unwrap().current_file = Some(path.clone());
-        let url = format!("{HF_BASE}/{}/resolve/{}/{path}", spec.repo, spec.revision);
+        let url = file_url(spec, &path);
         let dst = dir.join(&path);
         let Some(digest) = fetch_file(&client, &url, &dst, size, sha.as_deref(), state, cancel).await? else {
             return Ok(false);
@@ -327,6 +316,7 @@ async fn run_download(
             repo: Some(spec.repo.clone()),
             revision: Some(spec.revision.clone()),
             path: None,
+            url: Some(spec.host.page_url(&spec.repo, &spec.revision)),
         },
         installed_at: chrono::Utc::now().timestamp_millis(),
         files: records,
@@ -334,6 +324,73 @@ async fn run_download(
     store::write_metadata(&dir, &meta)?;
     tracing::info!("[decision] downloaded Laya `{}` from {}@{}", spec.id, spec.repo, short(&spec.revision));
     Ok(true)
+}
+
+fn file_url(spec: &DownloadSpec, path: &str) -> String {
+    match spec.host {
+        Host::HuggingFace => format!("{HF_BASE}/{}/resolve/{}/{path}", spec.repo, spec.revision),
+        Host::GithubRelease { .. } => format!(
+            "{GITHUB_BASE}/{}/releases/download/{}/{}",
+            spec.repo,
+            spec.revision,
+            store::github_asset_name(path)
+        ),
+    }
+}
+
+/// Size and (when known) sha256 of every file at the pinned source, by path.
+async fn expected_files(
+    client: &reqwest::Client,
+    spec: &DownloadSpec,
+) -> anyhow::Result<HashMap<String, (u64, Option<String>)>> {
+    let mut expected: HashMap<String, (u64, Option<String>)> = HashMap::new();
+    let manifest = match &spec.manifest {
+        Some(m) => {
+            let bytes = client.get(file_url(spec, m)).send().await?.error_for_status()?.bytes().await?;
+            if let Host::GithubRelease { manifest_sha256 } = spec.host {
+                let got = hex::encode(Sha256::digest(&bytes));
+                if got != manifest_sha256 {
+                    anyhow::bail!(
+                        "{}@{}: {m} is not the pinned one (sha256 {got}, expected {manifest_sha256})",
+                        spec.repo,
+                        spec.revision
+                    );
+                }
+            }
+            Some(serde_json::from_slice::<serde_json::Value>(&bytes)?)
+        }
+        None => None,
+    };
+    let listed = |m: &serde_json::Value| -> Vec<(String, u64, String)> {
+        m["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| {
+                Some((f["path"].as_str()?.to_string(), f["size"].as_u64().unwrap_or(0), f["sha256"].as_str()?.to_ascii_lowercase()))
+            })
+            .collect()
+    };
+    match spec.host {
+        Host::HuggingFace => {
+            for e in tree(client, &spec.repo, &spec.revision).await? {
+                expected.insert(e.path.clone(), (e.size, e.lfs.as_ref().map(|l| l.oid.clone())));
+            }
+            for (path, _, sha) in manifest.as_ref().map(listed).unwrap_or_default() {
+                if let Some(slot) = expected.get_mut(&path) {
+                    slot.1 = Some(sha);
+                }
+            }
+        }
+        // A release has no tree listing: the pinned manifest is the whole truth.
+        Host::GithubRelease { .. } => {
+            let manifest = manifest.ok_or_else(|| anyhow::anyhow!("a GitHub release download needs a manifest"))?;
+            for (path, size, sha) in listed(&manifest) {
+                expected.insert(path, (size, Some(sha)));
+            }
+        }
+    }
+    Ok(expected)
 }
 
 fn short(rev: &str) -> &str {
@@ -557,6 +614,7 @@ async fn run_import(
             repo: None,
             revision: None,
             path: Some(src.to_string_lossy().into_owned()),
+            url: None,
         },
         installed_at: chrono::Utc::now().timestamp_millis(),
         files: records,
@@ -569,6 +627,30 @@ async fn run_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_file_is_its_flattened_asset_and_a_hub_file_keeps_its_path() {
+        let spec = |host| DownloadSpec {
+            id: "m".into(),
+            label: None,
+            source_kind: "catalog",
+            host,
+            repo: "org/name".into(),
+            revision: "tag-1".into(),
+            files: vec![],
+            manifest: None,
+        };
+        let gh = spec(Host::GithubRelease { manifest_sha256: "" });
+        assert_eq!(
+            file_url(&gh, "tokenizer/tokenizer.json"),
+            "https://github.com/org/name/releases/download/tag-1/tokenizer__tokenizer.json"
+        );
+        let hf = spec(Host::HuggingFace);
+        assert_eq!(
+            file_url(&hf, "tokenizer/tokenizer.json"),
+            "https://huggingface.co/org/name/resolve/tag-1/tokenizer/tokenizer.json"
+        );
+    }
 
     #[test]
     fn imports_skip_litter_and_foreign_partials() {
