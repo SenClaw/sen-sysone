@@ -1,0 +1,46 @@
+name: model-laya-browser
+
+# Tag push (`model-laya-browser-v19s`, …) → export cklxx/laya-browser to ONNX,
+# check it against PyTorch, and attach the files to that tag's GitHub release.
+# The catalog entry `laya-browser` (src/decision/laya/store.rs) downloads from
+# that release and pins its manifest.json by sha256. Nobody signs in anywhere:
+# the checkpoint is public on Hugging Face and the release uses GITHUB_TOKEN.
+# Tags not starting with `v` never trigger the runtime release (release.yml).
+on:
+  push:
+    tags: ["model-laya-browser-*"]
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The versions the export was first made and checked with.
+      - name: Install the exporter
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.0
+          python -m pip install laya==0.3.20 onnx==1.23.0 onnxscript==0.7.2 onnxruntime==1.30.0 \
+            huggingface_hub==1.33.0 transformers==5.17.0 tokenizers==0.23.2
+      - name: Export and check parity
+        run: python tools/laya-browser-export/export.py --out dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MANIFEST_SHA=$(sha256sum dist/model/manifest.json | cut -d' ' -f1)
+          {
+            echo "Laya Browser v19s as ONNX, exported in CI from cklxx/laya-browser@645cf36 and checked against PyTorch."
+            echo
+            echo "Downloaded by sen-sysone's catalog entry \`laya-browser\`. Asset names flatten \`/\` to \`__\`."
+            echo
+            echo "manifest.json sha256: \`$MANIFEST_SHA\`"
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/assets/* \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md
