@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "sen-sysone"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "SenClaw decision runtime: typed choice/score/noul answers from a local Laya checkpoint (ONNX Runtime) or a hosted Jev-compatible backend"
 license = "MIT"
