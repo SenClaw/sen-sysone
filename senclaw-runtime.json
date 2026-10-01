@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "sen-sysone",
   "name": "SenClaw Decision (System One)",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Typed choice/score/noul decisions from a local Laya checkpoint (ONNX Runtime) or a hosted Jev-compatible backend",
   "type": "decision",
   "slots": ["decision"],
@@ -19,6 +19,6 @@
   "idleTimeoutSecs": 300,
   "api": { "openaiBase": "/v1" },
   "homepage": "https://github.com/SenClaw/sen-sysone",
-  "releaseNotesUrl": "https://github.com/SenClaw/sen-sysone/releases/tag/v0.1.1",
+  "releaseNotesUrl": "https://github.com/SenClaw/sen-sysone/releases/tag/v0.1.2",
   "license": "MIT"
 }
